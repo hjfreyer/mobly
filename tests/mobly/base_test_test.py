@@ -66,6 +66,16 @@ class BaseTestTest(unittest.TestCase):
   def tearDown(self):
     shutil.rmtree(self.tmp_dir)
 
+  def _get_summary_records_by_name(self, test_name):
+    """Gets the test record entries of a given name from the summary file."""
+    with io.open(self.summary_file, 'r', encoding='utf-8') as f:
+      return [
+          entry
+          for entry in yaml.safe_load_all(f)
+          if entry['Type'] == records.TestSummaryEntryType.RECORD.value
+          and entry[records.TestResultEnums.RECORD_NAME] == test_name
+      ]
+
   def test_paths(self):
     """Checks the output paths set in `BaseTestClass`."""
     path_checker = mock.MagicMock()
@@ -1201,6 +1211,39 @@ class BaseTestTest(unittest.TestCase):
         'Error 0, Executed 1, Failed 1, Passed 0, Requested 3, Skipped 2',
     )
 
+  def test_abort_class_in_on_fail_from_setup_class(self):
+    class MockBaseTest(base_test.BaseTestClass):
+
+      def setup_class(self):
+        asserts.fail(MSG_UNEXPECTED_EXCEPTION)
+
+      def test_1(self):
+        never_call()
+
+      def test_2(self):
+        never_call()
+
+      def test_3(self):
+        never_call()
+
+      def on_fail(self, record):
+        asserts.abort_class(MSG_EXPECTED_EXCEPTION)
+
+    bt_cls = MockBaseTest(self.mock_test_cls_configs)
+    bt_cls.run(test_names=['test_1', 'test_2', 'test_3'])
+    setup_class_record = bt_cls.results.error[0]
+    self.assertEqual(setup_class_record.test_name, 'setup_class')
+    self.assertEqual(
+        bt_cls.results.summary_str(),
+        'Error 1, Executed 0, Failed 0, Passed 0, Requested 3, Skipped 3',
+    )
+    # The record must also make it to the summary file, otherwise the summary
+    # would count an error without a corresponding record.
+    self.assertEqual(
+        self._get_summary_records_by_name('setup_class')[0]['Result'],
+        records.TestResultEnums.TEST_RESULT_ERROR,
+    )
+
   def test_setup_and_teardown_execution_count(self):
     class MockBaseTest(base_test.BaseTestClass):
 
@@ -1373,6 +1416,37 @@ class BaseTestTest(unittest.TestCase):
     self.assertEqual(
         bt_cls.results.summary_str(),
         'Error 1, Executed 0, Failed 0, Passed 0, Requested 3, Skipped 3',
+    )
+    # The record must also make it to the summary file, otherwise the summary
+    # would count an error without a corresponding record.
+    self.assertEqual(
+        self._get_summary_records_by_name('setup_class')[0]['Result'],
+        records.TestResultEnums.TEST_RESULT_ERROR,
+    )
+
+  def test_abort_all_in_on_fail_from_setup_class_with_expects(self):
+    class MockBaseTest(base_test.BaseTestClass):
+
+      def setup_class(self):
+        expects.expect_true(False, MSG_UNEXPECTED_EXCEPTION)
+
+      def test_1(self):
+        never_call()
+
+      def on_fail(self, record):
+        asserts.abort_all(MSG_EXPECTED_EXCEPTION)
+
+    bt_cls = MockBaseTest(self.mock_test_cls_configs)
+    with self.assertRaisesRegex(
+        signals.TestAbortAll, MSG_EXPECTED_EXCEPTION
+    ) as context:
+      bt_cls.run(test_names=['test_1'])
+    setup_class_record = bt_cls.results.error[0]
+    self.assertEqual(setup_class_record.test_name, 'setup_class')
+    self.assertTrue(hasattr(context.exception, 'results'))
+    self.assertEqual(
+        self._get_summary_records_by_name('setup_class')[0]['Result'],
+        records.TestResultEnums.TEST_RESULT_ERROR,
     )
 
   def test_abort_all_in_test(self):
